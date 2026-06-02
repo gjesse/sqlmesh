@@ -2822,6 +2822,116 @@ def test_plan_start_when_preview_enabled(make_snapshot, mocker: MockerFixture):
     assert plan_builder.build().start == default_start_for_preview
 
 
+def test_forward_only_preview_start_does_not_limit_regular_backfill(make_snapshot):
+    normal_old_snapshot = make_snapshot(
+        SqlModel(
+            name="normal",
+            query=parse_one("select 1, ds"),
+            dialect="duckdb",
+            kind=dict(name=ModelKindName.INCREMENTAL_BY_TIME_RANGE, time_column="ds"),
+            start="2025-01-01",
+        )
+    )
+    normal_old_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    normal_new_snapshot = make_snapshot(
+        SqlModel(
+            name="normal",
+            query=parse_one("select 2, ds"),
+            dialect="duckdb",
+            kind=dict(name=ModelKindName.INCREMENTAL_BY_TIME_RANGE, time_column="ds"),
+            start="2025-01-01",
+        )
+    )
+    normal_new_snapshot.previous_versions = normal_old_snapshot.all_versions
+
+    preview_old_snapshot = make_snapshot(
+        SqlModel(
+            name="preview",
+            query=parse_one("select 1, ds"),
+            dialect="duckdb",
+            kind=dict(
+                name=ModelKindName.INCREMENTAL_BY_TIME_RANGE,
+                time_column="ds",
+                forward_only=True,
+            ),
+            start="2025-01-01",
+        )
+    )
+    preview_old_snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
+    preview_new_snapshot = make_snapshot(
+        SqlModel(
+            name="preview",
+            query=parse_one("select 2, ds"),
+            dialect="duckdb",
+            kind=dict(
+                name=ModelKindName.INCREMENTAL_BY_TIME_RANGE,
+                time_column="ds",
+                forward_only=True,
+            ),
+            start="2025-01-01",
+        )
+    )
+    preview_new_snapshot.previous_versions = preview_old_snapshot.all_versions
+
+    context_diff = ContextDiff(
+        environment="test_environment",
+        is_new_environment=True,
+        is_unfinalized_environment=False,
+        normalize_environment_name=True,
+        create_from="prod",
+        create_from_env_exists=True,
+        added=set(),
+        removed_snapshots={},
+        modified_snapshots={
+            normal_new_snapshot.name: (normal_new_snapshot, normal_old_snapshot),
+            preview_new_snapshot.name: (preview_new_snapshot, preview_old_snapshot),
+        },
+        snapshots={
+            normal_new_snapshot.snapshot_id: normal_new_snapshot,
+            preview_new_snapshot.snapshot_id: preview_new_snapshot,
+        },
+        new_snapshots={
+            normal_new_snapshot.snapshot_id: normal_new_snapshot,
+            preview_new_snapshot.snapshot_id: preview_new_snapshot,
+        },
+        previous_plan_id=None,
+        previously_promoted_snapshot_ids=set(),
+        previous_finalized_snapshots=None,
+        previous_gateway_managed_virtual_layer=False,
+        gateway_managed_virtual_layer=False,
+        environment_statements=[],
+    )
+
+    plan = PlanBuilder(
+        context_diff,
+        default_start="2025-01-02",
+        end="2025-01-03",
+        preview_min_intervals=1,
+        backfill_models={normal_new_snapshot.name, preview_new_snapshot.name},
+        is_dev=True,
+        enable_preview=True,
+    ).build()
+
+    assert plan.provided_start is None
+    assert plan.missing_intervals == [
+        SnapshotIntervals(
+            snapshot_id=normal_new_snapshot.snapshot_id,
+            intervals=[
+                (to_timestamp("2025-01-01"), to_timestamp("2025-01-02")),
+                (to_timestamp("2025-01-02"), to_timestamp("2025-01-03")),
+                (to_timestamp("2025-01-03"), to_timestamp("2025-01-04")),
+            ],
+        ),
+        SnapshotIntervals(
+            snapshot_id=preview_new_snapshot.snapshot_id,
+            intervals=[
+                (to_timestamp("2025-01-02"), to_timestamp("2025-01-03")),
+                (to_timestamp("2025-01-03"), to_timestamp("2025-01-04")),
+            ],
+        ),
+    ]
+
+
 def test_end_override_per_model(make_snapshot):
     snapshot = make_snapshot(SqlModel(name="a", query=parse_one("select 1, ds")))
     snapshot.categorize_as(SnapshotChangeCategory.BREAKING)
