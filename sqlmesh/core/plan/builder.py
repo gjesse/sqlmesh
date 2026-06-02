@@ -87,6 +87,8 @@ class PlanBuilder:
         default_start: The default plan start to use if not specified.
         default_end: The default plan end to use if not specified.
         enable_preview: Whether to enable preview for forward-only models in development environments.
+        preview_start: The start time to use for forward-only previews. Defaults to the plan start.
+        preview_min_intervals: The minimum number of intervals to preview for each forward-only preview snapshot.
         end_bounded: If set to true, the missing intervals will be bounded by the target end date, disregarding lookback,
             allow_partials, and other attributes that could cause the intervals to exceed the target end date.
         ensure_finalized_snapshots: Whether to compare against snapshots from the latest finalized
@@ -125,6 +127,8 @@ class PlanBuilder:
         default_start: t.Optional[TimeLike] = None,
         default_end: t.Optional[TimeLike] = None,
         enable_preview: bool = False,
+        preview_start: t.Optional[TimeLike] = None,
+        preview_min_intervals: int = 0,
         end_bounded: bool = False,
         ensure_finalized_snapshots: bool = False,
         explain: bool = False,
@@ -148,6 +152,8 @@ class PlanBuilder:
             allow_additive_models if allow_additive_models is not None else []
         )
         self._enable_preview = enable_preview
+        self._preview_start = preview_start
+        self._preview_min_intervals = preview_min_intervals
         self._end_bounded = end_bounded
         self._ensure_finalized_snapshots = ensure_finalized_snapshots
         self._ignore_cron = ignore_cron
@@ -447,9 +453,12 @@ class PlanBuilder:
             possible_intervals = {
                 restatements[p.snapshot_id] for p in restating_parents if p.is_incremental
             }
+            removal_start = (
+                self._forward_only_preview_start(snapshot, start, end) if is_preview else start
+            )
             possible_intervals.add(
                 snapshot.get_removal_interval(
-                    start,
+                    removal_start,
                     end,
                     self._execution_time,
                     strict=False,
@@ -473,6 +482,21 @@ class PlanBuilder:
             restatements[s_id] = (snapshot_start, snapshot_end)
 
         return restatements
+
+    def _forward_only_preview_start(
+        self, snapshot: Snapshot, default_start: TimeLike, end: TimeLike
+    ) -> TimeLike:
+        preview_start = self._preview_start or default_start
+        if not self._preview_min_intervals:
+            return preview_start
+
+        relative_base = to_datetime(self.execution_time)
+        preview_end = to_datetime(end, relative_base=relative_base)
+        min_start = snapshot.node.cron_floor(preview_end)
+        for _ in range(self._preview_min_intervals):
+            min_start = snapshot.node.cron_prev(min_start)
+
+        return min(to_datetime(preview_start, relative_base=relative_base), min_start)
 
     def _build_directly_and_indirectly_modified(
         self, dag: DAG[SnapshotId]
